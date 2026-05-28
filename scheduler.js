@@ -167,7 +167,7 @@ async function generateMessage(type) {
   let bonusInstruction = 'אין בונוס מיוחד היום, שמור על טבעי.';
   if (bonus === '30deposit') bonusInstruction = 'היום יש ' + (br.monday_wednesday || '30% הפקדה לא מקוזז') + '. הזכר פעם אחת בלבד בערב.';
   if (bonus === '100casino') bonusInstruction = 'היום יש ' + (br.tuesday_thursday || '100% קזינו ו-50% ספורט') + '. הזכר פעם אחת בלבד בערב.';
-  if (bonus === 'weekend') bonusInstruction = 'סופ"ש! שווק חזק: ' + (br.weekend || '100% קזינו ו-50% ספורט') + ' לא מקוזז!';
+  if (bonus === 'weekend') bonusInstruction = 'סופ"ש! שווק חזק: ' + (br.weekend || '100% קזינו ו-50% ספורט') + ' 100₪ מתנה בהפקדה!';
 
   const promptTemplate = (config.prompts && config.prompts[type]) || ('אתה ' + (config.agentName || 'רובי') + ', סוכן הימורים. כתוב הודעה קצרה לקהילה. סיים עם wa.me/972' + (config.agentPhone || '547554270'));
   const prompt = promptTemplate
@@ -232,6 +232,31 @@ cron.schedule('0 12 * * *', async () => {
   });
 }, { timezone: 'Asia/Jerusalem' });
 
+// 14:30 — נעל הגרלות (webhook יאחסן בתור ממתינות)
+cron.schedule('30 14 * * *', async () => {
+  console.log('⏰ 14:30 — נועל הגרלות ליום...');
+  if (isShabbat() || isMoatzash()) { console.log('שבת/מוצ"ש — לא נועל'); return; }
+  const history = loadTemplateHistory();
+  const raffles = await getOpenRaffles();
+  if (!raffles.length) { console.log('אין הגרלות פתוחות'); return; }
+  const twoRaffles = shouldSendTwoRaffles(history);
+  console.log('📋 היום ' + (twoRaffles ? '2 הגרלות' : 'הגרלה אחת'));
+  if (twoRaffles && raffles.length >= 2) {
+    const football = raffles.find(function(r) { return r.sport === 'football'; }) || raffles[0];
+    const basketball = raffles.find(function(r) { return r.sport === 'basketball' && r.id !== football.id; }) || raffles[1];
+    const t1 = chooseTemplate(history);
+    await setTemplate(football.id, t1.variant, t1.questionCount);
+    await lockRaffle(football.id);
+    const t2 = chooseTemplate({ lastVariant: t1.variant, lastQuestionCount: t1.questionCount });
+    await setTemplate(basketball.id, t2.variant, t2.questionCount);
+    await lockRaffle(basketball.id);
+    saveTemplateHistory({ lastVariant: t2.variant, lastQuestionCount: t2.questionCount, lastTwoRaffles: true });
+  } else {
+    await lockAndSendRaffle(raffles, history);
+    saveTemplateHistory({ ...loadTemplateHistory(), lastTwoRaffles: false });
+  }
+}, { timezone: 'Asia/Jerusalem' });
+
 // 15:00 — הודעת אחר הצהריים
 cron.schedule('0 15 * * *', async () => {
   console.log('⏰ 15:00');
@@ -239,67 +264,12 @@ cron.schedule('0 15 * * *', async () => {
 }, { timezone: 'Asia/Jerusalem' });
 
 // 18:00 — הודעת ערב
-cron.schedule('0 18 * * *', async () => {
+
   console.log('⏰ 18:00');
   await sendWithDelay(async () => { const msg = await generateMessage(isWeekend() ? 'weekend' : 'evening'); await sendText(msg); });
 }, { timezone: 'Asia/Jerusalem' });
 
-// 19:00 — הגרלה ראשונה (אם יש 2 היום)
-cron.schedule('0 19 * * *', async () => {
-  console.log('⏰ 19:00');
-  if (isShabbat() || isMoatzash()) return;
-  const history = loadTemplateHistory();
-  if (!shouldSendTwoRaffles(history)) {
-    console.log('📋 היום הגרלה אחת — ב-20:00');
-    return;
-  }
-  console.log('🎯 היום 2 הגרלות! שולח ראשונה...');
-  const raffles = await getOpenRaffles();
-  if (raffles.length < 2) { console.log('אין מספיק הגרלות פתוחות'); return; }
-  
-  // שלח ראשונה (כדורגל אם יש)
-  const football = raffles.find(r => r.sport === 'football') || raffles[0];
-  const historyNow = loadTemplateHistory();
-  const template = chooseTemplate(historyNow);
-  await setTemplate(football.id, template.variant, template.questionCount);
-  const locked = await lockRaffle(football.id);
-  if (locked) {
-    saveTemplateHistory({ lastVariant: template.variant, lastQuestionCount: template.questionCount, lastTwoRaffles: true });
-    setTimeout(async () => { const msg = await generateMessage('afterRaffle'); await sendText(msg); }, 3 * 60 * 1000);
-  }
-}, { timezone: 'Asia/Jerusalem' });
 
-// 20:00 — הגרלה (ראשונה אם יום רגיל, שנייה אם יום של 2)
-cron.schedule('0 20 * * *', async () => {
-  console.log('⏰ 20:00');
-  if (isShabbat()) return;
-  if (isMoatzash()) {
-    await sendWithDelay(async () => { const msg = await generateMessage('motzash'); await sendText(msg); });
-    return;
-  }
-
-  const history = loadTemplateHistory();
-  const raffles = await getOpenRaffles();
-
-  if (history.lastTwoRaffles) {
-    // כבר שלחנו ב-19:00 — שולחים את השנייה עכשיו
-    console.log('🎯 שולח הגרלה שנייה (כדורסל)...');
-    const basketball = raffles.find(r => r.sport === 'basketball') || raffles[0];
-    if (!basketball) { console.log('אין הגרלה שנייה'); return; }
-    const template = chooseTemplate(history);
-    await setTemplate(basketball.id, template.variant, template.questionCount);
-    const locked = await lockRaffle(basketball.id);
-    if (locked) {
-      saveTemplateHistory({ lastVariant: template.variant, lastQuestionCount: template.questionCount, lastTwoRaffles: false });
-      setTimeout(async () => { const msg = await generateMessage('afterRaffle'); await sendText(msg); }, 3 * 60 * 1000);
-    }
-  } else {
-    // יום רגיל — הגרלה אחת
-    console.log('🎯 שולח הגרלה יומית...');
-    const locked = await lockAndSendRaffle(raffles, history);
-    if (locked) setTimeout(async () => { const msg = await generateMessage('afterRaffle'); await sendText(msg); }, 3 * 60 * 1000);
-  }
-}, { timezone: 'Asia/Jerusalem' });
 
 // 22:00 — הודעת לילה
 cron.schedule('0 22 * * *', async () => {
