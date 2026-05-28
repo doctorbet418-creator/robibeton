@@ -265,7 +265,7 @@ cron.schedule('0 18 * * *', async function() {
 }, { timezone: 'Asia/Jerusalem' });
 
 // ── 22:00 — הודעת לילה ──
-cron.schedule('49 21 * * *', async function() {
+cron.schedule('08 22 * * *', async function() {
   console.log('⏰ 22:00');
   await sendWithDelay(async function() {
     var msg = await generateMessage(isWeekend() ? 'weekend' : 'lateEvening');
