@@ -119,6 +119,10 @@ textarea{line-height:1.65;min-height:110px}
       <button class="nav-btn" onclick="showPage('send',this)"><span class="nav-icon">📤</span> שליחה ידנית</button>
       <button class="nav-btn" onclick="showPage('settings',this)"><span class="nav-icon">⚙️</span> הגדרות</button>
     </div>
+    <div class="nav-g">
+      <span class="nav-label">בדיקות</span>
+      <button class="nav-btn" onclick="showPage('test',this)"><span class="nav-icon">🧪</span> הרצת טסט</button>
+    </div>
   </div>
 
   <div class="main">
@@ -198,6 +202,67 @@ textarea{line-height:1.65;min-height:110px}
       <div class="card">
         <div class="ch"><div class="ct">🎯 הגרלות</div><button class="btn btn-ghost btn-sm" onclick="loadRaffles()">↻ רענן</button></div>
         <div class="cb" id="rafflesList"><div style="color:var(--muted);text-align:center;padding:1.5rem">טוען...</div></div>
+      </div>
+    </div>
+
+
+    <!-- טסט -->
+    <div class="page" id="page-test">
+      <div class="ph"><div class="ph-title">🧪 הרצת טסט</div><div class="ph-sub">בדוק את כל ההודעות לפני שהן יוצאות לקהילה</div></div>
+      
+      <div class="card">
+        <div class="ch"><div class="ct">⚡ טסט מהיר — הודעה בודדת</div></div>
+        <div class="cb">
+          <label>בחר סוג הודעה</label>
+          <select id="testType">
+            <option value="morning">☀️ בוקר (10:00)</option>
+            <option value="noon">🌤 צהריים (12:00)</option>
+            <option value="afternoon">⛅ אחר הצהריים (15:00)</option>
+            <option value="evening">🌆 ערב (18:00)</option>
+            <option value="lateEvening">🌙 לילה (22:00)</option>
+            <option value="midnight">🕛 חצות (00:00)</option>
+            <option value="lateNight">🌒 01:00</option>
+            <option value="veryLateNight">🌑 02:00</option>
+            <option value="weekend">🎉 סופ"ש</option>
+            <option value="motzash">✨ מוצאי שבת</option>
+            <option value="afterRaffle">🎯 אחרי הגרלה</option>
+          </select>
+          <div id="previewBox" style="display:none;margin-top:14px">
+            <label>תצוגה מקדימה</label>
+            <div id="previewText" style="background:var(--bg4);border:1px solid var(--border);border-radius:9px;padding:12px;font-size:13px;line-height:1.7;white-space:pre-wrap;color:var(--text);min-height:80px"></div>
+            <button class="btn btn-green" onclick="sendTestMsg()" style="margin-top:10px">📤 שלח לקהילה</button>
+          </div>
+          <button class="btn btn-gold" onclick="previewMsg()">👁 צור תצוגה מקדימה</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="ch">
+          <div class="ct">🚀 טסט מלא — כל ההודעות</div>
+          <div id="testStatusBadge" style="display:none;font-size:11px;padding:4px 10px;border-radius:6px;background:rgba(245,200,66,0.1);color:var(--gold);border:1px solid var(--border)">רץ...</div>
+        </div>
+        <div class="cb">
+          <div class="hint" style="margin-bottom:14px">הבוט ישלח את כל סוגי ההודעות לקהילה בזה אחר זה, עם הפסקה קצרה בין כל הודעה. כך תוכל לראות את כל ההודעות בפועל ולוודא שהן נראות טוב.</div>
+          
+          <label>Group ID לשליחה</label>
+          <input id="testGroupId" placeholder="120363xxxxxxx@g.us" />
+          
+          <label>זמן המתנה בין הודעות</label>
+          <select id="testDelay">
+            <option value="15">15 שניות (מהיר)</option>
+            <option value="30" selected>30 שניות (מומלץ)</option>
+            <option value="60">דקה</option>
+            <option value="120">2 דקות</option>
+          </select>
+
+          <div id="testProgress" style="display:none;margin-top:14px">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:8px">📊 התקדמות הטסט:</div>
+            <div id="testLog" style="background:var(--bg4);border:1px solid var(--border);border-radius:9px;padding:10px;font-size:12px;font-family:IBM Plex Mono,monospace;color:var(--green);min-height:80px;max-height:200px;overflow-y:auto;line-height:1.8"></div>
+          </div>
+
+          <button class="btn btn-gold" id="testBtn" onclick="runFullTest()" style="margin-top:14px">🚀 הרץ טסט מלא</button>
+          <button class="btn" id="stopBtn" onclick="stopTest()" style="display:none;background:rgba(239,68,68,0.1);color:var(--red);border:1px solid rgba(239,68,68,0.2);width:100%;margin-top:8px">⛔ עצור טסט</button>
+        </div>
       </div>
     </div>
 
@@ -402,6 +467,104 @@ function showToast(msg, err) {
   t.className = 'toast show' + (err ? ' err' : '');
   clearTimeout(tt);
   tt = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+
+async function previewMsg() {
+  const type = document.getElementById('testType').value;
+  const btn = document.querySelector('#page-test .btn-gold');
+  btn.textContent = '⏳ יוצר...';
+  btn.disabled = true;
+  try {
+    const r = await fetch(SERVER + '/api/generateTest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type }) });
+    const d = await r.json();
+    if (d.success) {
+      document.getElementById('previewText').textContent = d.message;
+      document.getElementById('previewBox').style.display = 'block';
+    } else { showToast('❌ שגיאה: ' + d.error, true); }
+  } catch(e) { showToast('❌ שגיאת חיבור', true); }
+  btn.textContent = '👁 צור תצוגה מקדימה';
+  btn.disabled = false;
+}
+
+async function sendTestMsg() {
+  const chatId = getV('testGroupId') || getV('sendChatId');
+  const content = document.getElementById('previewText').textContent;
+  if (!chatId) { showToast('❌ הגדר Group ID קודם', true); return; }
+  try {
+    await fetch(SERVER + '/api/sendText', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chatId, content }) });
+    showToast('✅ נשלח!');
+  } catch(e) { showToast('❌ שגיאה', true); }
+}
+
+let testRunning = false;
+
+async function runFullTest() {
+  const chatId = getV('testGroupId');
+  if (!chatId) { showToast('❌ הכנס Group ID', true); return; }
+  const delay = parseInt(getV('testDelay')) || 30;
+  
+  testRunning = true;
+  document.getElementById('testBtn').style.display = 'none';
+  document.getElementById('stopBtn').style.display = 'block';
+  document.getElementById('testStatusBadge').style.display = 'block';
+  document.getElementById('testProgress').style.display = 'block';
+  const log = document.getElementById('testLog');
+  log.innerHTML = '';
+
+  const types = [
+    { key: 'morning', label: '☀️ בוקר' },
+    { key: 'noon', label: '🌤 צהריים' },
+    { key: 'afternoon', label: '⛅ אחה"צ' },
+    { key: 'evening', label: '🌆 ערב' },
+    { key: 'lateEvening', label: '🌙 לילה' },
+    { key: 'midnight', label: '🕛 חצות' },
+    { key: 'weekend', label: '🎉 סופ"ש' },
+    { key: 'afterRaffle', label: '🎯 אחרי הגרלה' },
+  ];
+
+  for (let i = 0; i < types.length; i++) {
+    if (!testRunning) { log.innerHTML += '⛔ הטסט עוצר...
+'; break; }
+    const t = types[i];
+    log.innerHTML += `⏳ מייצר: ${t.label}...
+`;
+    log.scrollTop = log.scrollHeight;
+    try {
+      const r = await fetch(SERVER + '/api/generateTest', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: t.key }) });
+      const d = await r.json();
+      if (d.success) {
+        const header = `🧪 טסט: ${t.label}\n\n`;
+        await fetch(SERVER + '/api/sendText', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chatId, content: header + d.message }) });
+        log.innerHTML += `✅ נשלח: ${t.label}
+`;
+      } else { log.innerHTML += `❌ שגיאה: ${t.label}
+`; }
+    } catch(e) { log.innerHTML += `❌ שגיאה: ${t.label}
+`; }
+    log.scrollTop = log.scrollHeight;
+    if (i < types.length - 1 && testRunning) {
+      log.innerHTML += `⏳ ממתין ${delay} שניות...
+`;
+      log.scrollTop = log.scrollHeight;
+      await new Promise(r => setTimeout(r, delay * 1000));
+    }
+  }
+  
+  if (testRunning) { log.innerHTML += '\n✅ הטסט הושלם!'; showToast('✅ טסט הושלם!'); }
+  testRunning = false;
+  document.getElementById('testBtn').style.display = 'block';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('testStatusBadge').style.display = 'none';
+  log.scrollTop = log.scrollHeight;
+}
+
+function stopTest() {
+  testRunning = false;
+  document.getElementById('testBtn').style.display = 'block';
+  document.getElementById('stopBtn').style.display = 'none';
+  document.getElementById('testStatusBadge').style.display = 'none';
+  showToast('⛔ הטסט עוצר...');
 }
 
 loadConfig();

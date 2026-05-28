@@ -10,6 +10,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const WHAPI_TOKEN = process.env.WHAPI_TOKEN || '';
 const WHAPI_URL = 'https://gate.whapi.cloud';
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const raffleMessages = {};
 const PROMPTS_FILE = './prompts.json';
 
@@ -18,6 +19,45 @@ function loadPrompts() {
   return {};
 }
 function savePrompts(data) { fs.writeFileSync(PROMPTS_FILE, JSON.stringify(data, null, 2)); }
+
+// ── יצירת הודעה עם AI ──
+async function generateMessage(type, config) {
+  const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
+  const dayName = dayNames[new Date().getDay()];
+  
+  const bonusMap = {
+    morning: 'אין בונוס בבוקר',
+    noon: 'אין בונוס בצהריים',
+    afternoon: 'אין בונוס אחה"צ',
+    evening: `יש בונוס ערב: ${config.bonusRules?.monday_wednesday || '30% הפקדה'}`,
+    lateEvening: '70% קזינו 40% ספורט לשעות הלילה',
+    midnight: 'קזינו פתוח 24/6',
+    lateNight: 'ציפורי לילה מרוויחות יותר',
+    veryLateNight: 'שעתיים לפנות בוקר הקזינו בוער',
+    weekend: `סופ"ש: ${config.bonusRules?.weekend || '100% קזינו 50% ספורט'}`,
+    motzash: 'מוצאי שבת חוזרים לאקשן',
+    afterRaffle: 'הגרלה זה עתה נשלחה',
+  };
+
+  const promptTemplate = config.prompts?.[type] || `אתה ${config.agentName || 'רובי'}, סוכן הימורים. כתוב הודעה קצרה לקהילה בסגנון חברותי. סיים עם wa.me/972${config.agentPhone || '547554270'}`;
+  const bonusInstruction = bonusMap[type] || '';
+  
+  const prompt = promptTemplate
+    .replace(/{agentName}/g, config.agentName || 'רובי')
+    .replace(/{agentPhone}/g, config.agentPhone || '547554270')
+    .replace(/{day}/g, dayName)
+    .replace(/{baseRules}/g, config.baseRules || '')
+    .replace(/{bonusInstruction}/g, bonusInstruction);
+
+  const res = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: prompt }]
+  }, {
+    headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+  });
+  return res.data.content[0].text;
+}
 
 app.get('/', (req, res) => res.redirect('/admin'));
 app.get('/admin', (req, res) => { try { res.sendFile(__dirname + '/panel.html'); } catch(e) { res.send('Panel not found'); } });
@@ -89,6 +129,48 @@ app.get('/api/getGroups', async (req, res) => {
     const response = await axios.get(`${WHAPI_URL}/groups`, { headers: { 'Authorization': `Bearer ${WHAPI_TOKEN}` } });
     res.json({ groups: (response.data?.groups || []).map(g => ({ id: g.id, name: g.name })) });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── טסט: יצור הודעה לפי פרומפט ──
+app.post('/api/generateTest', async (req, res) => {
+  const { type } = req.body;
+  if (!type) return res.status(400).json({ error: 'חסר type' });
+  try {
+    const config = loadPrompts();
+    const msg = await generateMessage(type, config);
+    res.json({ success: true, message: msg });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── טסט: שלח כל ההודעות לקבוצה ──
+app.post('/api/runFullTest', async (req, res) => {
+  const { chatId, delaySeconds } = req.body;
+  if (!chatId) return res.status(400).json({ error: 'חסר chatId' });
+  
+  res.json({ success: true, message: 'טסט התחיל! הודעות יישלחו בזה אחר זה.' });
+  
+  const types = ['morning', 'noon', 'afternoon', 'evening', 'lateEvening', 'midnight', 'weekend', 'afterRaffle'];
+  const labels = ['☀️ בוקר', '🌤 צהריים', '⛅ אחה"צ', '🌆 ערב', '🌙 לילה', '🕛 חצות', '🎉 סופ"ש', '🎯 אחרי הגרלה'];
+  const delay = (delaySeconds || 30) * 1000;
+  const config = loadPrompts();
+
+  for (let i = 0; i < types.length; i++) {
+    try {
+      await new Promise(r => setTimeout(r, i === 0 ? 1000 : delay));
+      const msg = await generateMessage(types[i], config);
+      if (!msg) continue;
+      const header = `━━━━━━━━━━━━━━━\n🧪 *טסט: ${labels[i]}*\n━━━━━━━━━━━━━━━\n\n`;
+      await axios.post(`${WHAPI_URL}/messages/text`, { to: chatId, body: header + msg }, {
+        headers: { 'Authorization': `Bearer ${WHAPI_TOKEN}`, 'Content-Type': 'application/json' }
+      });
+      console.log(`✅ טסט נשלח: ${types[i]}`);
+    } catch(err) {
+      console.error(`❌ שגיאה בטסט ${types[i]}:`, err.message);
+    }
+  }
+  console.log('✅ טסט הושלם!');
 });
 
 app.listen(PORT, '0.0.0.0', () => {
