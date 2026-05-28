@@ -1,480 +1,234 @@
-const cron = require('node-cron');
+const express = require('express');
+const cors = require('cors');
 const axios = require('axios');
 const fs = require('fs');
-const { randomDelay, isWeekend, isMoatzash } = require('./messages');
 
-const GROUP_ID = process.env.GROUP_ID;
-const SUPABASE_URL = 'https://oxraakhcpvthlvjvapay.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im94cmFha2hjcHZ0aGx2anZhcGF5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzgwNzY4MTUsImV4cCI6MjA5MzY1MjgxNX0.dftK8Qb9zjzwEVGRLv4Q54Pqn2SLrzOxUqydIYf3Xd8';
-const SERVER_URL = process.env.SERVER_URL || 'http://localhost:3000';
+const app = express();
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
+app.use(express.json());
+
+const PORT = process.env.PORT || 3000;
+const WHAPI_TOKEN = process.env.WHAPI_TOKEN || '';
+const WHAPI_URL = 'https://gate.whapi.cloud';
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
+const WEBHOOK_SECRET = process.env.BOT_WEBHOOK_SECRET || '';
+const raffleMessages = {};
 const PROMPTS_FILE = './prompts.json';
 
-const LOVABLE_URL = process.env.LOVABLE_URL || 'https://id-preview--82197b76-973a-461d-86d9-6790e471f6b6.lovable.app';
-const BOT_SECRET = process.env.BOT_WEBHOOK_SECRET || '';
-
-// ── היסטוריית תבניות ──
-const TEMPLATE_HISTORY_FILE = './template_history.json';
-
-function loadTemplateHistory() {
-  try { if (fs.existsSync(TEMPLATE_HISTORY_FILE)) return JSON.parse(fs.readFileSync(TEMPLATE_HISTORY_FILE, 'utf8')); } catch(e) {}
-  return { lastVariant: -1, lastQuestionCount: 0, lastDate: '' };
-}
-
-function saveTemplateHistory(data) {
-  fs.writeFileSync(TEMPLATE_HISTORY_FILE, JSON.stringify(data, null, 2));
-}
-
-// ── בחר תבנית שלא חזרה על עצמה ──
-function chooseTemplate(history) {
-  const today = new Date().toISOString().split('T')[0];
-  
-  // רוטציה: 1 שאלה → 2 שאלות → 1 שאלה → 3 שאלות → ...
-  const rotations = [
-    { variant: 0, questionCount: 1 },
-    { variant: 1, questionCount: 2 },
-    { variant: 0, questionCount: 1 },
-    { variant: 2, questionCount: 3 },
-    { variant: 1, questionCount: 2 },
-    { variant: 0, questionCount: 1 },
-  ];
-  
-  const lastVariant = history.lastVariant;
-  const lastQ = history.lastQuestionCount;
-  
-  // מצא את הרוטציה הבאה שלא חוזרת על אותה תבנית
-  for (let i = 0; i < rotations.length; i++) {
-    const r = rotations[i];
-    if (r.variant !== lastVariant || r.questionCount !== lastQ) {
-      return r;
-    }
-  }
-  
-  // fallback
-  return { variant: 0, questionCount: 1 };
-}
-
-// ── שלוף הגרלות פתוחות מ-Lovable ──
-async function getOpenRaffles() {
-  try {
-    const res = await axios.get(\`\${LOVABLE_URL}/api/public/bot/raffles?locked=false\`, {
-      headers: { 'X-Bot-Secret': BOT_SECRET }
-    });
-    return res.data || [];
-  } catch(err) {
-    console.error('❌ שגיאה בשליפת הגרלות:', err.message);
-    return [];
-  }
-}
-
-// ── שנה תבנית ──
-async function setTemplate(raffleId, variant, questionCount) {
-  try {
-    await axios.post(\`\${LOVABLE_URL}/api/public/bot/template\`, {
-      raffleId,
-      variant,
-      questionCount
-    }, {
-      headers: { 'X-Bot-Secret': BOT_SECRET, 'Content-Type': 'application/json' }
-    });
-    console.log(\`✅ תבנית שונתה: variant=\${variant}, questions=\${questionCount}\`);
-    return true;
-  } catch(err) {
-    console.error('❌ שגיאה בשינוי תבנית:', err.message);
-    return false;
-  }
-}
-
-// ── נעל הגרלה ──
-async function lockRaffle(raffleId) {
-  try {
-    await axios.post(\`\${LOVABLE_URL}/api/public/bot/lock\`, {
-      raffleId
-    }, {
-      headers: { 'X-Bot-Secret': BOT_SECRET, 'Content-Type': 'application/json' }
-    });
-    console.log(\`✅ הגרלה ננעלה: \${raffleId}\`);
-    return true;
-  } catch(err) {
-    console.error('❌ שגיאה בנעילת הגרלה:', err.message);
-    return false;
-  }
-}
-
-// ── פונקציה ראשית: בחר ונעל הגרלה ──
-async function selectAndLockRaffle() {
-  console.log('🎯 מחפש הגרלה לנעילה...');
-  
-  const raffles = await getOpenRaffles();
-  if (!raffles.length) {
-    console.log('אין הגרלות פתוחות היום');
-    return false;
-  }
-  
-  console.log(\`📋 נמצאו \${raffles.length} הגרלות פתוחות\`);
-  
-  // בחר הגרלה אקראית מהרשימה
-  const raffle = raffles[Math.floor(Math.random() * raffles.length)];
-  console.log(\`🎯 נבחרה הגרלה: \${raffle.match_title || raffle.id}\`);
-  
-  // בחר תבנית שלא חוזרת על עצמה
-  const history = loadTemplateHistory();
-  const template = chooseTemplate(history);
-  console.log(\`📐 תבנית: variant=\${template.variant}, questions=\${template.questionCount}\`);
-  
-  // שנה תבנית
-  await setTemplate(raffle.id, template.variant, template.questionCount);
-  
-  // נעל הגרלה (הwebhook ישלח אוטומטית לקהילה)
-  const locked = await lockRaffle(raffle.id);
-  
-  if (locked) {
-    // שמור היסטוריה
-    saveTemplateHistory({
-      lastVariant: template.variant,
-      lastQuestionCount: template.questionCount,
-      lastDate: new Date().toISOString().split('T')[0]
-    });
-    console.log('✅ הגרלה ננעלה ונשלחה לקהילה!');
-    return true;
-  }
-  
-  return false;
-}
-
-function isShabbat() {
-  const now = new Date();
-  const day = now.getDay();
-  const hour = now.getHours();
-  if (day === 5 && hour >= 17) return true;
-  if (day === 6 && hour < 20) return true;
-  return false;
-}
-
-function getTodayBonus() {
-  const day = new Date().getDay();
-  if (day === 1 || day === 3) return '30deposit';
-  if (day === 2 || day === 4) return '100casino';
-  if (day === 4 || day === 5) return 'weekend';
-  return 'none';
-}
-
 function loadPrompts() {
-  try {
-    if (fs.existsSync(PROMPTS_FILE)) return JSON.parse(fs.readFileSync(PROMPTS_FILE, 'utf8'));
-  } catch(e) {}
-  return getDefaultPrompts();
+  try { if (fs.existsSync(PROMPTS_FILE)) return JSON.parse(fs.readFileSync(PROMPTS_FILE, 'utf8')); } catch(e) {}
+  return {};
 }
+function savePrompts(data) { fs.writeFileSync(PROMPTS_FILE, JSON.stringify(data, null, 2)); }
 
-function getDefaultPrompts() {
-  return {
-    agentName: 'רובי',
-    agentPhone: '547554270',
-    baseRules: `כתוב בסגנון חברותי וחם כמו חבר טוב שכותב לחברים שלו
-השתמש באימוג'ים בצורה טבעית — לא יותר מדי ולא פחות מדי
-אל תשתמש במקפים ארוכים (—) בכלל
-תהיה ספציפי וישיר — אל תדבר על משחקים שאתה לא יודע עליהם
-אל תמציא שמות קבוצות או תוצאות
-תמיד סיים עם קישור ליצירת קשר`,
-    bonusRules: {
-      monday_wednesday: 'בונוס הפקדה 30% לא מקוזז',
-      tuesday_thursday: 'בונוס 100% קזינו ו-50% ספורט',
-      weekend: '100% קזינו ו-50% ספורט'
-    },
-    prompts: {
-      morning: `אתה {agentName}, סוכן הימורים של BetON עם קהילת VIP בוואטסאפ.
-כתוב הודעת בוקר קצרה לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-אל תזכיר בונוסים ספציפיים בבוקר
-אל תדבר על משחקים ספציפיים שאתה לא יודע עליהם
-אורך: 2-3 שורות קצרות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      noon: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת צהריים קצרה לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-הזכר לפעמים שהמחלקה הפיננסית פתוחה עד 18:00 למשיכות
-אל תזכיר בונוסים בצהריים
-אורך: 2-3 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      afternoon: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת אחר צהריים לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-אפשר לרמוז שיש משחקים בערב בלי לפרט אותם
-אל תזכיר בונוסים עדיין
-אורך: 2-3 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      evening: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת ערב לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-{bonusInstruction}
-אם יש בונוס היום — הצג אותו בצורה ברורה ומפתה עם אימוג'ים
-ציין שהבונוס לא מקוזז במשיכה — זה חשוב מאוד!
-אורך: 4-7 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      lateEvening: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת לילה (22:00) לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-דבר על קזינו ומשחקי לילה בצורה מרגשת
-אפשר להציע בונוס קזינו לשעות הלילה
-אורך: 4-6 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      midnight: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת חצות לקהילה.
-
-חוקים:
-{baseRules}
-{agentName} ער 24/6 ומחכה להפקדות
-אפשר לציין בונוס לשעות הלילה
-אורך: 2-4 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      lateNight: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת 01:00 לקהילה.
-
-חוקים:
-{baseRules}
-שעות קטנות — ציפורי לילה מרוויחות יותר
-קצר מאוד, 2-3 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      veryLateNight: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת 02:00 לקהילה.
-
-חוקים:
-{baseRules}
-שעתיים לפנות בוקר — הקזינו לא עוצר
-קצר מאוד, 2 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      weekend: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת סופ"ש לקהילה. יום: {day}.
-
-חוקים:
-{baseRules}
-זה סופ"ש! תשתגע עם הבונוסים:
-🎰 100% בונוס קזינו
-⚽ 50% בונוס ספורט
-הדגש שהבונוסים לא מקוזזים במשיכה
-אפשר לציין בונוסים מיוחדים להפקדות גדולות
-אורך: 5-8 שורות מושקעות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      motzash: `אתה {agentName}, סוכן הימורים של BetON.
-כתוב הודעת מוצאי שבת לקהילה.
-
-חוקים:
-{baseRules}
-שבת יצאה — חוזרים לאקשן!
-שבוע טוב לכולם, עכשיו מתחילים שבוע חדש
-אורך: 3-4 שורות
-סיים עם: wa.me/972{agentPhone} | {agentName} 🎰`,
-
-      afterRaffle: `אתה {agentName}, סוכן הימורים של BetON.
-הרגע שלחת הגרלה לקהילה. כתוב הודעת עידוד קצרה.
-
-חוקים:
-{baseRules}
-עודד להגיב עם הניחוש
-הזכר שרק מי שהפקיד אצל {agentName} זכאי לזכות
-אורך: 2-3 שורות קצרות
-סיים עם {agentName} 🎰`,
-    }
-  };
-}
-
-async function generateMessage(type) {
-  const config = loadPrompts();
-  const now = new Date();
+async function generateMessage(type, config) {
   const dayNames = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
-  const dayName = dayNames[now.getDay()];
-  const bonus = getTodayBonus();
-
-  let bonusInstruction = 'אין בונוס מיוחד היום — שמור על הודעה טבעית ומעניינת בלי להבטיח כלום.';
-  const br = config.bonusRules || {};
-  if (bonus === '30deposit') bonusInstruction = `היום יש ${br.monday_wednesday || 'בונוס הפקדה 30% לא מקוזז'}. הזכר את זה פעם אחת בלבד בערב.`;
-  if (bonus === '100casino') bonusInstruction = `היום יש ${br.tuesday_thursday || 'בונוס 100% קזינו ו-50% ספורט'}. הזכר את זה פעם אחת בלבד בערב.`;
-  if (bonus === 'weekend') bonusInstruction = `סופ"ש! תשווק חזק: ${br.weekend || '100% קזינו ו-50% ספורט'} — לא מקוזז במשיכה!`;
-
-  const promptTemplate = config.prompts?.[type] || config.prompts?.morning || '';
+  const dayName = dayNames[new Date().getDay()];
+  const bonusMap = {
+    morning: 'אין בונוס בבוקר',
+    noon: 'אין בונוס בצהריים',
+    afternoon: 'אין בונוס אחה"צ',
+    evening: 'יש בונוס ערב: ' + (config.bonusRules && config.bonusRules.monday_wednesday || '30% הפקדה'),
+    lateEvening: '70% קזינו 40% ספורט לשעות הלילה',
+    midnight: 'קזינו פתוח 24/6',
+    lateNight: 'ציפורי לילה מרוויחות יותר',
+    veryLateNight: 'שעתיים לפנות בוקר הקזינו בוער',
+    weekend: 'סופ"ש: ' + (config.bonusRules && config.bonusRules.weekend || '100% קזינו 50% ספורט'),
+    motzash: 'מוצאי שבת חוזרים לאקשן',
+    afterRaffle: 'הגרלה זה עתה נשלחה',
+  };
+  const promptTemplate = (config.prompts && config.prompts[type]) || ('אתה ' + (config.agentName || 'רובי') + ', סוכן הימורים. כתוב הודעה קצרה לקהילה. סיים עם wa.me/972' + (config.agentPhone || '547554270'));
+  const bonusInstruction = bonusMap[type] || '';
   const prompt = promptTemplate
     .replace(/{agentName}/g, config.agentName || 'רובי')
     .replace(/{agentPhone}/g, config.agentPhone || '547554270')
     .replace(/{day}/g, dayName)
     .replace(/{baseRules}/g, config.baseRules || '')
     .replace(/{bonusInstruction}/g, bonusInstruction);
+  const res = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 400,
+    messages: [{ role: 'user', content: prompt }]
+  }, { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } });
+  return res.data.content[0].text;
+}
 
+app.get('/', (req, res) => res.redirect('/admin'));
+app.get('/admin', (req, res) => { try { res.sendFile(__dirname + '/panel.html'); } catch(e) { res.send('Panel not found'); } });
+app.get('/qr', (req, res) => res.send('<html dir="rtl"><head><meta charset="utf-8"><title>BetON</title><style>body{background:#07070F;color:#f0f0f5;font-family:sans-serif;text-align:center;padding:3rem}h1{color:#F5C842}.ok{background:#0f2a1a;border:2px solid #22c55e;border-radius:12px;padding:2rem;display:inline-block;color:#22c55e;font-size:1.3rem;margin-top:1rem}</style></head><body><h1>BetON Bot</h1><div class="ok">Whapi מחובר!</div></body></html>'));
+
+app.get('/api/status', async (req, res) => {
+  try { const r = await axios.get(WHAPI_URL + '/health', { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN } }); res.json({ ready: true, status: r.data }); }
+  catch(err) { res.json({ ready: false }); }
+});
+
+app.get('/api/prompts', (req, res) => res.json(loadPrompts()));
+app.post('/api/prompts', (req, res) => { try { savePrompts(req.body); res.json({ success: true }); } catch(e) { res.status(500).json({ error: e.message }); } });
+
+app.post('/api/sendText', async (req, res) => {
+  const { chatId, content } = req.body;
   try {
-    const res = await axios.post('https://api.anthropic.com/v1/messages', {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 400,
-      messages: [{ role: 'user', content: prompt }]
-    }, {
-      headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
-    });
-    return res.data.content[0].text;
-  } catch (err) {
-    console.error('❌ שגיאה ב-AI:', err.message);
-    return null;
-  }
-}
+    const sent = await axios.post(WHAPI_URL + '/messages/text', { to: chatId, body: content }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+    console.log('✅ נשלח:', content.substring(0, 40) + '...');
+    res.json({ success: true, messageId: sent.data && sent.data.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-async function sendWithDelay(fn, maxMinutes = 10) {
-  const delay = randomDelay(maxMinutes);
-  await new Promise(resolve => setTimeout(resolve, delay));
-  await fn();
-}
-
-async function sendText(text) {
-  if (isShabbat() && !isMoatzash()) { console.log('🕌 שבת'); return; }
-  if (!text) return;
+app.post('/api/sendImage', async (req, res) => {
+  const { chatId, url, caption, raffleId } = req.body;
   try {
-    await axios.post(`${SERVER_URL}/api/sendText`, { chatId: GROUP_ID, content: text });
-    console.log('✅ נשלח:', text.substring(0, 40) + '...');
-  } catch (err) { console.error('❌ שגיאה:', err.message); }
-}
+    const sent = await axios.post(WHAPI_URL + '/messages/image', { to: chatId, media: url, caption: caption || '' }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+    if (raffleId) raffleMessages[raffleId] = sent.data && sent.data.id;
+    res.json({ success: true, messageId: sent.data && sent.data.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-async function sendRaffle(raffle) {
-  if (isShabbat() && !isMoatzash()) return false;
+app.post('/api/sendTextWithId', async (req, res) => {
+  const { chatId, content, raffleId } = req.body;
   try {
-    if (raffle.image_url) {
-      await axios.post(`${SERVER_URL}/api/sendImage`, { chatId: GROUP_ID, url: raffle.image_url, caption: raffle.raffle_text || '', raffleId: raffle.id });
-    } else {
-      await axios.post(`${SERVER_URL}/api/sendTextWithId`, { chatId: GROUP_ID, content: raffle.raffle_text || '', raffleId: raffle.id });
-    }
-    console.log('✅ הגרלה נשלחה:', raffle.match_title);
-    watchRaffleForFinish(raffle.id);
-    return true;
-  } catch (err) { console.error('❌ שגיאה:', err.message); return false; }
-}
+    const sent = await axios.post(WHAPI_URL + '/messages/text', { to: chatId, body: content }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+    if (raffleId) raffleMessages[raffleId] = sent.data && sent.data.id;
+    res.json({ success: true, messageId: sent.data && sent.data.id });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-async function sendResults(raffle) {
+app.get('/api/getMessageReplies', async (req, res) => {
+  const { messageId } = req.query;
+  if (!messageId) return res.status(400).json({ error: 'חסר messageId' });
   try {
-    if (raffle.results_image_url) {
-      await axios.post(`${SERVER_URL}/api/sendImage`, { chatId: GROUP_ID, url: raffle.results_image_url, caption: raffle.results || '' });
-    } else {
-      await axios.post(`${SERVER_URL}/api/sendText`, { chatId: GROUP_ID, content: raffle.results || '' });
-    }
-    console.log('✅ תוצאות נשלחו');
-  } catch (err) { console.error('❌ שגיאה:', err.message); }
-}
+    const GROUP_ID = process.env.GROUP_ID;
+    const response = await axios.get(WHAPI_URL + '/messages/list/' + GROUP_ID, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN }, params: { count: 1000 } });
+    const messages = response.data && response.data.messages || [];
+    const replies = messages.filter(function(m) { return m.context && m.context.quoted_id === messageId; }).map(function(m) { return { senderName: m.from_name || m.from, senderId: m.from, body: (m.text && m.text.body) || '', timestamp: m.timestamp }; });
+    res.json({ replies: replies });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 
-function watchRaffleForFinish(raffleId) {
-  const checkInterval = setInterval(async () => {
+app.get('/api/getRaffleMessageId', (req, res) => res.json({ messageId: raffleMessages[req.query.raffleId] || null }));
+
+app.post('/api/findWinners', async (req, res) => {
+  const { raffleId } = req.body;
+  if (!raffleId) return res.status(400).json({ error: 'חסר raffleId' });
+  try {
+    const messageId = raffleMessages[raffleId];
+    if (!messageId) return res.status(404).json({ error: 'לא נמצא messageId' });
+    const { findWinners } = require('./winner-finder');
+    const result = await findWinners(raffleId, messageId);
+    res.json({ success: true, result: result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/getGroups', async (req, res) => {
+  try {
+    const response = await axios.get(WHAPI_URL + '/groups', { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN } });
+    res.json({ groups: (response.data && response.data.groups || []).map(function(g) { return { id: g.id, name: g.name }; }) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/generateTest', async (req, res) => {
+  const { type } = req.body;
+  if (!type) return res.status(400).json({ error: 'חסר type' });
+  try {
+    const config = loadPrompts();
+    const msg = await generateMessage(type, config);
+    res.json({ success: true, message: msg });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/runFullTest', async (req, res) => {
+  const { chatId, delaySeconds } = req.body;
+  if (!chatId) return res.status(400).json({ error: 'חסר chatId' });
+  res.json({ success: true, message: 'טסט התחיל!' });
+  const types = ['morning', 'noon', 'afternoon', 'evening', 'lateEvening', 'midnight', 'weekend', 'afterRaffle'];
+  const labels = ['☀️ בוקר', '🌤 צהריים', '⛅ אחה"צ', '🌆 ערב', '🌙 לילה', '🕛 חצות', '🎉 סופ"ש', '🎯 אחרי הגרלה'];
+  const delay = (delaySeconds || 30) * 1000;
+  const config = loadPrompts();
+  for (let i = 0; i < types.length; i++) {
     try {
-      const res = await axios.get(`${SUPABASE_URL}/rest/v1/raffles?id=eq.${raffleId}&select=is_finished,results`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
-      const raffle = res.data[0];
-      if (raffle?.is_finished && raffle?.results) {
-        clearInterval(checkInterval);
-        setTimeout(async () => {
+      await new Promise(function(r) { setTimeout(r, i === 0 ? 1000 : delay); });
+      const msg = await generateMessage(types[i], config);
+      if (!msg) continue;
+      const header = '🧪 טסט: ' + labels[i] + '\n\n';
+      await axios.post(WHAPI_URL + '/messages/text', { to: chatId, body: header + msg }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+      console.log('✅ טסט נשלח: ' + types[i]);
+    } catch(err) { console.error('❌ שגיאה בטסט ' + types[i] + ':', err.message); }
+  }
+  console.log('✅ טסט הושלם!');
+});
+
+// ── Webhook מ-Lovable ──
+app.post('/webhook/lovable', async (req, res) => {
+  const secret = req.headers['x-bot-secret'] || req.headers['x-webhook-secret'];
+  if (WEBHOOK_SECRET && secret !== WEBHOOK_SECRET) {
+    console.log('❌ Webhook: סיסמה שגויה');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const event = req.body.event;
+  const raffle = req.body.raffle;
+  const text = req.body.text;
+  const imageUrl = req.body.imageUrl;
+  const GROUP_ID = process.env.GROUP_ID;
+
+  console.log('📨 Webhook מ-Lovable: ' + event + ' | sport: ' + (raffle && raffle.sport));
+
+  try {
+    if (event === 'raffle_locked') {
+      // שלח הגרלה לקהילה
+      let messageId = null;
+      if (imageUrl) {
+        const sent = await axios.post(WHAPI_URL + '/messages/image', {
+          to: GROUP_ID, media: imageUrl, caption: text || ''
+        }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+        messageId = sent.data && sent.data.id;
+      } else {
+        const sent = await axios.post(WHAPI_URL + '/messages/text', {
+          to: GROUP_ID, body: text || ''
+        }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+        messageId = sent.data && sent.data.id;
+      }
+      if (raffle && raffle.id && messageId) {
+        raffleMessages[raffle.id] = messageId;
+        console.log('💾 messageId נשמר להגרלה: ' + raffle.id);
+      }
+      console.log('✅ הגרלה נשלחה לקהילה: ' + (raffle && raffle.match_title));
+    }
+
+    if (event === 'raffle_results') {
+      // שלח תוצאות לקהילה
+      if (imageUrl) {
+        await axios.post(WHAPI_URL + '/messages/image', {
+          to: GROUP_ID, media: imageUrl, caption: text || ''
+        }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+      } else {
+        await axios.post(WHAPI_URL + '/messages/text', {
+          to: GROUP_ID, body: text || ''
+        }, { headers: { 'Authorization': 'Bearer ' + WHAPI_TOKEN, 'Content-Type': 'application/json' } });
+      }
+      console.log('✅ תוצאות נשלחו לקהילה');
+
+      // חפש זוכים אחרי 2 דקות
+      if (raffle && raffle.id) {
+        setTimeout(async function() {
           try {
-            const { findWinners } = require('./winner-finder');
-            const msgRes = await axios.get(`${SERVER_URL}/api/getRaffleMessageId?raffleId=${raffleId}`);
-            if (msgRes.data.messageId) await findWinners(raffleId, msgRes.data.messageId);
-          } catch (err) { console.error('שגיאה בזוכים:', err.message); }
+            const messageId = raffleMessages[raffle.id];
+            if (messageId) {
+              const { findWinners } = require('./winner-finder');
+              await findWinners(raffle.id, messageId);
+            }
+          } catch(err) { console.error('שגיאה בזוכים:', err.message); }
         }, 2 * 60 * 1000);
       }
-    } catch (err) { console.error('שגיאה:', err.message); }
-  }, 5 * 60 * 1000);
-  setTimeout(() => clearInterval(checkInterval), 12 * 60 * 60 * 1000);
-}
+    }
 
-async function getTodayRaffles() {
-  const today = new Date().toISOString().split('T')[0];
-  const res = await axios.get(`${SUPABASE_URL}/rest/v1/raffles?raffle_date=eq.${today}&locked=eq.true&order=created_at.asc`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
-  return res.data;
-}
-
-async function getYesterdayResults() {
-  const yesterday = new Date();
-  yesterday.setDate(yesterday.getDate() - 1);
-  const res = await axios.get(`${SUPABASE_URL}/rest/v1/raffles?raffle_date=eq.${yesterday.toISOString().split('T')[0]}&results=not.is.null&is_finished=eq.true`, { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } });
-  return res.data;
-}
-
-cron.schedule('0 9 * * *', async () => {
-  console.log('⏰ 09:00');
-  const results = await getYesterdayResults();
-  for (const r of results) { await sendResults(r); await new Promise(res => setTimeout(res, 3000)); }
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 10 * * *', async () => {
-  console.log('⏰ 10:00');
-  await sendWithDelay(async () => { const msg = await generateMessage(isWeekend() ? 'weekend' : 'morning'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 11 * * *', async () => {
-  console.log('⏰ 11:00');
-  const raffles = await getTodayRaffles();
-  if (raffles.length > 0) {
-    const sent = await sendRaffle(raffles[0]);
-    if (sent) setTimeout(async () => { const msg = await generateMessage('afterRaffle'); await sendText(msg); }, 60 * 60 * 1000);
+    res.json({ success: true });
+  } catch(err) {
+    console.error('❌ שגיאה ב-Webhook:', err.message);
+    res.status(500).json({ error: err.message });
   }
-}, { timezone: 'Asia/Jerusalem' });
+});
 
-cron.schedule('0 12 * * *', async () => {
-  console.log('⏰ 12:00');
-  await sendWithDelay(async () => { const type = isMoatzash() ? 'motzash' : isWeekend() ? 'weekend' : 'noon'; const msg = await generateMessage(type); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 15 * * *', async () => {
-  console.log('⏰ 15:00');
-  await sendWithDelay(async () => { const msg = await generateMessage(isWeekend() ? 'weekend' : 'afternoon'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 18 * * *', async () => {
-  console.log('⏰ 18:00');
-  await sendWithDelay(async () => { const msg = await generateMessage(isWeekend() ? 'weekend' : 'evening'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 20 * * *', async () => {
-  console.log('⏰ 20:00');
-  if (isMoatzash()) { await sendWithDelay(async () => { const msg = await generateMessage('motzash'); await sendText(msg); }); return; }
-  if (isShabbat()) { console.log('🕌 שבת'); return; }
-  
-  // נעל הגרלה אוטומטית מ-Lovable
-  const locked = await selectAndLockRaffle();
-  if (locked) {
-    // שלח הודעת עידוד אחרי הגרלה
-    setTimeout(async () => {
-      const msg = await generateMessage('afterRaffle', loadPrompts());
-      await sendText(msg);
-    }, 3 * 60 * 1000); // 3 דקות אחרי
-  }
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 22 * * *', async () => {
-  console.log('⏰ 22:00');
-  await sendWithDelay(async () => { const msg = await generateMessage(isWeekend() ? 'weekend' : 'lateEvening'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 0 * * *', async () => {
-  console.log('⏰ 00:00');
-  await sendWithDelay(async () => { const msg = await generateMessage('midnight'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 1 * * *', async () => {
-  console.log('⏰ 01:00');
-  await sendWithDelay(async () => { const msg = await generateMessage('lateNight'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-cron.schedule('0 2 * * *', async () => {
-  console.log('⏰ 02:00');
-  await sendWithDelay(async () => { const msg = await generateMessage('veryLateNight'); await sendText(msg); });
-}, { timezone: 'Asia/Jerusalem' });
-
-console.log('📅 תזמון אוטומטי פעיל — שעון ישראל');
+app.listen(PORT, '0.0.0.0', function() {
+  console.log('🚀 BetON Bot פועל על פורט ' + PORT);
+  setTimeout(function() { require('./scheduler'); console.log('📅 תזמון אוטומטי פעיל!'); }, 5000);
+});
